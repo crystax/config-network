@@ -1,0 +1,115 @@
+#!/bin/bash
+
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+EDITOR=${EDITOR:-vi}
+PAGER=${PAGER:-more}
+
+LOGFILE=/etc/network/netifaces-$(date '+%Y%m%d-%H%M%S').log
+TIMEOUT=30
+
+get_yes_no()
+{
+    while true; do
+        echo -n "$1 (Y/N) ? "
+        read -t ${TIMEOUT} a
+        if [ $? -ne 0 ]; then
+            a="no"
+            return
+        fi
+        case $a in
+            [Yy])
+                a="yes"
+                ;;
+            [Nn])
+                a="no"
+                ;;
+            *)
+                continue
+        esac
+        return
+    done
+}
+
+edit_file=/etc/network/interfaces
+
+apply_configuration()
+{
+    local tmpfile=$(mktemp -t netifaces.XXXXXX)
+    cat >$tmpfile <<EOF
+PATH=/bin:/sbin:/usr/bin:/usr/sbin
+export PATH
+
+run()
+{
+    echo "## COMMAND: \$@"
+    "\$@"
+}
+
+run ifdown -a
+for i in \$(ls -1 /sys/class/net/); do
+    test "\$i" = "lo" && continue
+    run ip addr flush \$i
+done
+sleep 2
+
+run ifup -a
+EOF
+
+    nohup /bin/bash $tmpfile
+    rm -f $tmpfile
+}
+
+restore_configuration()
+{
+    if [ -f ${edit_file}.orig ]; then
+        #echo "Restoring saved configuration..."
+        mv -f ${edit_file}.orig ${edit_file}
+        apply_configuration
+        exit 1
+    fi
+}
+
+if [ -f ${edit_file}.new ]; then
+    get_yes_no "A new configuration file exists, do you want to use it"
+    test "$a" = "no" && cp -f ${edit_file} ${edit_file}.new
+else
+    cp ${edit_file} ${edit_file}.new
+fi
+
+trap restore_configuration EXIT HUP INT TERM QUIT ABRT
+
+${EDITOR} ${edit_file}.new
+
+get_yes_no "Do you want to apply new configuration"
+test "$a" = "no" && exit 1
+
+cat <<!
+
+The network configuration will be changed now.  If the message
+"Type Y to keep the new configuration"  does not appear on the
+screen or the Y key is not pressed in ${TIMEOUT} seconds, the original
+configuration will be restored.
+The TCP/IP connections might  be  broken  during  the  change.
+If so, restore the ssh/telnet connection being used.
+
+!
+
+if [ ! -f ${edit_file}.orig ]; then
+    cp ${edit_file} ${edit_file}.orig || exit 1
+fi
+
+cp -f ${edit_file}.new ${edit_file} || exit 1
+
+apply_configuration >${LOGFILE} 2>&1
+sleep 3
+service ssh restart
+
+/sbin/ifconfig
+
+get_yes_no "New configuration is active. Do you want to keep it"
+test "$a" != "yes" && restore_configuration
+
+rm -f ${edit_file}.new ${edit_file}.orig ${LOGFILE}
+exit 0
